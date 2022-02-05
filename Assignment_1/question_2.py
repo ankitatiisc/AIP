@@ -39,6 +39,54 @@ class FineTunedModel(nn.Module):
         x = self.feature_extractor(x)
         return self.linear(x)
 
+class SimpleModel(nn.Module):
+    """Simple CNN model.
+    """
+    def __init__(self):
+        super(SimpleModel,self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, 3, bias=False)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(16, 32, 3, bias=False)
+        self.conv3 = nn.Conv2d(32, 64, 3, bias=False)
+        self.conv4 = nn.Conv2d(64, 64, 3, padding=(1,1), bias=False)
+        self.fc1 = nn.Linear(64 * 13 * 13, 36, bias=False)
+        self.fc2 = nn.Linear(36, 6, bias=False)
+        self.leaky_relu = nn.LeakyReLU()
+
+    def forward(self, x):
+        """forward method
+
+        Args:
+            x (tensor): input tensor
+
+        Returns:
+            [tensor]: output from the model
+        """
+        x = self.pool(self.leaky_relu(self.conv1(x)))
+        #print(x.shape)
+        x = self.pool(self.leaky_relu(self.conv2(x)))
+        #print(x.shape)
+        x = self.pool(self.leaky_relu(self.conv3(x)))
+        x = self.pool(self.leaky_relu(self.conv4(x)))
+        #print(x.shape)
+        x = torch.flatten(x, 1) # flatten all dimensions except batch
+        x = self.leaky_relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+def init_weights(m):
+    """Initializes weights of the model.
+
+    Args:
+        m (layer): layer in the pytorch model.
+    """
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_normal_(m.weight)
+        #m.bias.data.fill_(0.01)
+    if isinstance(m, nn.Conv2d):
+        nn.init.xavier_normal_(m.weight)
+        #m.bias.data.fill_(0.01)
+
 def load_backbone(model_name:str, layer_num:int):
     """Loads backbone from the pretrained models
 
@@ -148,6 +196,43 @@ def finetuneCNN(data_folder, backbone, categories_to_id, id_to_categories):
     
     predict_from_CNN(data_folder, finetuned_model, categories_to_id, id_to_categories, img_res)
 
+def simpleCNN(data_folder, backbone, categories_to_id, id_to_categories):
+    model = SimpleModel()
+    model.apply(init_weights)
+    print(model)
+    model = nn.DataParallel(model).to(device)
+    img_res = (224, 224)
+
+    batch_size=32
+    #training dataset
+    train_dataset = ImagesDataLoader(data_folder, 'train', categories_to_id, img_res)
+    train_data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    
+    # set up optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    model.train()
+
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(50):
+        acc_loss = 0
+        num_data = 0
+        tqdm_iterator = tqdm(train_data_loader, desc='Train', total=len(train_data_loader))
+        for step, batch in enumerate(tqdm_iterator):
+            optimizer.zero_grad()
+            images = batch['img'].to(device)
+            labels = batch['label'].to(device)
+            output = model(images)
+            loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+            acc_loss = acc_loss + loss.item()
+            num_data = num_data + batch['img'].shape[0]
+        print('Epoch : {} Loss : {}'.format(epoch, acc_loss/num_data))
+    
+    predict_from_CNN(data_folder, model, categories_to_id, id_to_categories, img_res)
+    torch.save(model.state_dict(), './simple_cnn_model.pth')
+
 def get_id_to_categories(mapping):
     """Get id for the input categories
 
@@ -192,4 +277,5 @@ if __name__ == '__main__':
     id_to_categories = get_id_to_categories(categories_to_id)
 
     #run_NN_method(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
-    finetuneCNN(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
+    #finetuneCNN(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
+    simpleCNN(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
