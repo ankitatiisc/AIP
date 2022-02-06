@@ -9,6 +9,7 @@ python question_1.py
 
 ## CNN (Question 2)
 - Edit data_folder field in config.yaml file and give absolute path for the folder where both training and test data are present.
+- Run the script python create_train_test_csv.py. Ensure that config.yaml file is present in the working directory.
 ```sh
 python question_2.py config.yaml
 ```
