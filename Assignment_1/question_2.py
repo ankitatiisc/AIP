@@ -9,10 +9,12 @@ import torch.nn as nn
 import torchvision.models as models
 from torch.utils.data import DataLoader
 
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 from nearest_neighbour import NearestNeighbor
 from dataset_loader import ImagesDataLoader
+
+from torchsummary import summary
 
 import pdb
 
@@ -29,13 +31,28 @@ def freeze_weights(model):
         param.requires_grad = False
 
 class FineTunedModel(nn.Module):
+    """Fine tuned CNN model
+    """
     def __init__(self, feature_extractor):
+        """Constructor
+
+        Args:
+            feature_extractor (nn.Module): feature extractor module
+        """
         super(FineTunedModel,self).__init__()
         self.feature_extractor = feature_extractor
         freeze_weights(self.feature_extractor)
         self.linear = nn.Linear(4096, 6, bias=False)
 
     def forward(self, x):
+        """forward method
+
+        Args:
+            x (tensor): input tensor
+
+        Returns:
+            [tensor]: output from the model
+        """
         x = self.feature_extractor(x)
         return self.linear(x)
 
@@ -102,12 +119,24 @@ def load_backbone(model_name:str, layer_num:int):
         return m
 
 
-def prepare_dataset_ML(data_folder, backbone_model, categories_to_id, img_res,  dataset_type):
-    dataset = ImagesDataLoader(data_folder, dataset_type, categories_to_id, img_res)
+def prepare_dataset_ML(cfg, backbone_model, categories_to_id, img_res,  dataset_type):
+    """Prepares dataset for the ML module
+
+    Args:
+        cfg (dict): configuration file
+        backbone_model (str): name of the backbone model
+        categories_to_id (dict): categories to id map
+        img_res (tuple): Input image resolution
+        dataset_type (str): train/test
+    Returns:
+        [typle]: features, labels, image-paths
+    """
+    dataset = ImagesDataLoader(cfg[dataset_type], dataset_type, categories_to_id, img_res)
     data_loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=1)
     tqdm_iterator = tqdm(data_loader, desc='Eval', total=len(data_loader))
     features = np.zeros((len(dataset), 4096), dtype=np.float32)
     labels = np.zeros((len(dataset)), dtype=np.int32)
+    image_paths = []
     for step, batch in enumerate(tqdm_iterator):
         with torch.no_grad():
             batch_images = batch['img']
@@ -117,59 +146,98 @@ def prepare_dataset_ML(data_folder, backbone_model, categories_to_id, img_res,  
             offset = step * 32 #hard-coded
             features[offset:offset+curr_batch_size] = batch_features.data.cpu().numpy()
             labels[offset:offset+curr_batch_size] = batch_labels.data.cpu().numpy()
-    return features, labels
-            
+            image_paths = image_paths + batch['img_path']
+    return features, labels, image_paths
 
-def train_NN(data_folder, backbone_model, categoreies_to_id, id_to_categories, img_res):
+def find_wrong_predictions(gt_labels, pred_labels, test_img_paths, id_to_category):
+    """Find wrong predictions. 
+
+    Args:
+        gt_labels (np.array): ground-truth labels
+        pred_labels (np.array): predicted labels
+        test_img_paths (list): test image paths
+        id_to_category (dict): id to categories map
+    """
+    for i in range(gt_labels.shape[0]):
+        if gt_labels[i] != pred_labels[i]:
+            print('GT Label : {} , Predicted Label : {}'.format(id_to_category[gt_labels[i]], id_to_category[pred_labels[i]]))
+            print(test_img_paths[i])
+
+def train_NN(cfg, backbone_model, categoreies_to_id, id_to_categories, img_res):
     """Train nearest neighbor ML module.
 
     Args:
-        data_folder (str): path of the dataset folder
+        cfg (dict):configuration file
         backbone (str): name of the backbone model
         categories_to_id (dict): categories to id map
-        id_to_categories ([type]): id to categories map
+        id_to_categories (dict): id to categories map
         img_res (tuple): image resolution
     """
     NN = NearestNeighbor()
-    train_features, train_labels = prepare_dataset_ML(data_folder, backbone_model, categoreies_to_id, img_res, 'train')
-    test_features, test_labels = prepare_dataset_ML(data_folder, backbone_model, categoreies_to_id, img_res, 'test')
+    train_features, train_labels, train_img_paths = prepare_dataset_ML(cfg, backbone_model, categoreies_to_id, img_res, 'train')
+    test_features, test_labels, test_img_paths = prepare_dataset_ML(cfg, backbone_model, categoreies_to_id, img_res, 'test')
     NN.train(train_features, train_labels)
     pred_test_labels = NN.predict(test_features)
+    find_wrong_predictions(test_labels, pred_test_labels, test_img_paths, id_to_categories)
     target_names = [ id_to_categories[i] for i in range(len(categoreies_to_id.keys()))]
-    print(target_names)
+    
+    print(confusion_matrix(test_labels, pred_test_labels))
     print(classification_report(test_labels, pred_test_labels, target_names=target_names))
 
-def predict_from_CNN(data_folder, model, categoreies_to_id, id_to_categories, img_res):
+def predict_from_CNN(cfg, model, categoreies_to_id, id_to_categories, img_res):
+    """Predicts from a CNN module
+
+    Args:
+        cfg (dict): configuration file
+        model (nn.Module):CNN model
+        categories_to_id (dict): categories to id map
+        id_to_categories (dict): id to categories map
+        img_res (tuple): Input image resolution
+    """
     #training dataset
-    test_dataset = ImagesDataLoader(data_folder, 'test', categories_to_id, img_res)
+    test_dataset = ImagesDataLoader(cfg['test'], 'test', categories_to_id, img_res)
     test_data_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=1)
     pred_ = np.zeros((len(test_dataset)), dtype=np.int32)
     gt_ = np.zeros((len(test_dataset)), dtype=np.int32)
     model.eval()
-    tqdm_iterator = tqdm(test_data_loader, desc='Train', total=len(test_data_loader))
-    for step, batch in enumerate(tqdm_iterator):
-        with torch.no_grad():
-            images = batch['img'].to(device)
-            curr_labels = batch['label']
-            output = model(images)
-            _, curr_pred = torch.max(output,1)
-            curr_batch_size = images.shape[0]
-            offset = step * 32 #hard-coded
-            pred_[offset:offset+curr_batch_size] = curr_labels.data.cpu().numpy()
-            gt_[offset:offset+curr_batch_size] = curr_pred.data.cpu().numpy()
+    #tqdm_iterator = tqdm(test_data_loader, desc='Train', total=len(test_data_loader))
+    img_paths = []
+    prev_index = 0
+    for step, batch in enumerate(test_data_loader):
+        images = batch['img'].to(device)
+        curr_labels = batch['label']
+        img_paths = img_paths + batch['img_path']
+        output = model(images)
+        _, curr_pred = torch.max(output,1)
+        curr_batch_size = images.shape[0]
+        #pdb.set_trace()
+        pred_[prev_index:prev_index+curr_batch_size] = curr_pred.data.cpu().numpy()
+        gt_[prev_index:prev_index+curr_batch_size] = curr_labels.data.cpu().numpy()
+        prev_index = prev_index + curr_batch_size
 
+    #pdb.set_trace()
+    find_wrong_predictions(gt_, pred_, img_paths, id_to_categories)
     target_names = [ id_to_categories[i] for i in range(len(categoreies_to_id.keys()))]
-    print(target_names)
+    #print(target_names)
+    print(confusion_matrix(gt_, pred_))
     print(classification_report(gt_, pred_, target_names=target_names))
 
-def finetuneCNN(data_folder, backbone, categories_to_id, id_to_categories):
+def finetuneCNN(cfg, backbone, categories_to_id, id_to_categories):
+    """Runs fine-tune CNN method
+
+    Args:
+       cfg (dict): configuration file
+        backbone (str): name of the backbone model
+        categories_to_id (dict): categories to id map
+        id_to_categories (dict): id to categories map
+    """
     backbone_model = load_backbone(backbone, layer_num = -1)
     finetuned_model = FineTunedModel(backbone_model)
     finetuned_model = nn.DataParallel(finetuned_model).to(device)
     img_res = (224, 224)
 
     #training dataset
-    train_dataset = ImagesDataLoader(data_folder, 'train', categories_to_id, img_res)
+    train_dataset = ImagesDataLoader(cfg['train'], 'train', categories_to_id, img_res)
     train_data_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=2)
     
     # set up optimizer
@@ -178,7 +246,7 @@ def finetuneCNN(data_folder, backbone, categories_to_id, id_to_categories):
 
     criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(5):
+    for epoch in range(10):
         acc_loss = 0
         num_data = 0
         tqdm_iterator = tqdm(train_data_loader, desc='Train', total=len(train_data_loader))
@@ -194,19 +262,27 @@ def finetuneCNN(data_folder, backbone, categories_to_id, id_to_categories):
             num_data = num_data + batch['img'].shape[0]
         print('Epoch : {} Loss : {}'.format(epoch, acc_loss/num_data))
     
-    predict_from_CNN(data_folder, finetuned_model, categories_to_id, id_to_categories, img_res)
+    predict_from_CNN(cfg, finetuned_model, categories_to_id, id_to_categories, img_res)
 
-def simpleCNN(data_folder, backbone, categories_to_id, id_to_categories):
+def simpleCNN(cfg, backbone, categories_to_id, id_to_categories):
+    """Runs simple cnn method
+
+    Args:
+        cfg (dict): configuration file
+        backbone (str): name of the backbone model
+        categories_to_id (dict): categories to id map
+        id_to_categories (dict): id to categories map
+    """
     model = SimpleModel()
     model.apply(init_weights)
-    print(model)
+    print(summary(model.cuda(), (3,224,224)))
     model = nn.DataParallel(model).to(device)
     img_res = (224, 224)
 
     batch_size=32
     #training dataset
-    train_dataset = ImagesDataLoader(data_folder, 'train', categories_to_id, img_res)
-    train_data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_dataset = ImagesDataLoader(cfg['train'], 'train', categories_to_id, img_res)
+    train_data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
     
     # set up optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
@@ -230,7 +306,7 @@ def simpleCNN(data_folder, backbone, categories_to_id, id_to_categories):
             num_data = num_data + batch['img'].shape[0]
         print('Epoch : {} Loss : {}'.format(epoch, acc_loss/num_data))
     
-    predict_from_CNN(data_folder, model, categories_to_id, id_to_categories, img_res)
+    predict_from_CNN(cfg, model, categories_to_id, id_to_categories, img_res)
     torch.save(model.state_dict(), './simple_cnn_model.pth')
 
 def get_id_to_categories(mapping):
@@ -247,26 +323,25 @@ def get_id_to_categories(mapping):
         reverse_mapping[int(mapping[k])] = k
     return reverse_mapping
 
-def run_NN_method(data_folder, backbone, categories_to_id, id_to_categories):
+def run_NN_method(cfg, backbone, categories_to_id, id_to_categories):
     """Run the nearest neighbour method. 
 
     Args:
-        data_folder (str): path of the dataset folder
+        cfg (dict): configuration file
         backbone (str): name of the backbone model
         categories_to_id (dict): categories to id map
-        id_to_categories ([type]): id to categories map
+        id_to_categories (dict): id to categories map
     """
     backbone_model = load_backbone(backbone, layer_num = -3)
     backbone_model = nn.DataParallel(backbone_model).to(device)
     backbone_model.eval()
     img_res = (224, 224)
-    train_NN(data_folder, backbone_model, categories_to_id, id_to_categories, img_res)
+    train_NN(cfg, backbone_model, categories_to_id, id_to_categories, img_res)
 
 if __name__ == '__main__':
     #Parse Arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('cfg_file', default='vgg16', type=str)
-    parser.add_argument('--backbone', default='vgg16', type=str)
+    parser.add_argument('cfg_file', type=str)
     args = parser.parse_args()
 
     #read yaml file
@@ -276,6 +351,11 @@ if __name__ == '__main__':
     categories_to_id = cfg['categories']
     id_to_categories = get_id_to_categories(categories_to_id)
 
-    #run_NN_method(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
-    #finetuneCNN(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
-    simpleCNN(cfg['data_folder'], args.backbone, categories_to_id, id_to_categories)
+    print('Nearest Neighbor')
+    run_NN_method(cfg, 'vgg16', categories_to_id, id_to_categories)
+
+    print('Fine-Tune')
+    finetuneCNN(cfg, 'vgg16', categories_to_id, id_to_categories)
+
+    print('Simple CNN')
+    simpleCNN(cfg, 'vgg16', categories_to_id, id_to_categories)

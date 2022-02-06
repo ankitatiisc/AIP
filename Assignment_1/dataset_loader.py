@@ -1,5 +1,6 @@
 import os
 from PIL import Image
+import pandas as pd
 
 import torch
 from torch.utils.data import Dataset
@@ -7,32 +8,39 @@ from torchvision import transforms
 
 import pdb 
 
-def get_img_paths(folder, id):
-    img_paths = []
-    img_label = []
-    for file_ in os.listdir(folder):
-        if os.path.splitext(file_)[1] in ['.jpg']:
-            img_paths.append(os.path.join(folder,file_))
-            img_label.append(id)
-    return img_paths, img_label
-        
+     
 class ImagesDataLoader(Dataset):
-    def __init__(self, folder, dataset_type, categories_to_id, img_res):
-        super(ImagesDataLoader, self).__init__()  
+    """Image Data Loader
+    """
+    def __init__(self, csv_file, dataset_type, categories_to_id, img_res):
+        """Constructor
 
-        self.img_paths = []
-        self.img_labels = []
+        Args:
+            csv_file (str): csv file
+            dataset_type (str): type of dataset (train/test)
+            categories_to_id (dict): categories to id mapping
+            img_res (tuple): image resolution
+        """
+        super(ImagesDataLoader, self).__init__()  
+        self.data_set = pd.read_csv(csv_file)
+        #pdb.set_trace()
         self.dataset_type = dataset_type
-        for category in categories_to_id.keys():
-           curr_img_paths, curr_img_labels = get_img_paths(os.path.join(folder,category+"_"+ dataset_type), categories_to_id[category])
-           self.img_paths = self.img_paths + curr_img_paths
-           self.img_labels = self.img_labels + curr_img_labels
-        print('Loaded {} number of images ({})'.format(len(self.img_paths),dataset_type))
+        print('Loaded {} number of images ({})'.format(len(self.data_set), dataset_type))
 
     def __len__(self):
-        return len(self.img_paths)
+        """Length of the dataset.
+        """
+        return len(self.data_set)
 
     def get_rgb_img(self, img_path):
+        """Get RGB Image
+
+        Args:
+            img_path (str): path of the input image
+
+        Returns:
+            [tensor]: processed image tensor
+        """
         input_image = Image.open(img_path)
         preprocess = transforms.Compose([
             transforms.Resize((224,224)),
@@ -43,7 +51,16 @@ class ImagesDataLoader(Dataset):
         return img
 
     def __getitem__(self, index):
+        """Gets item given an index.
+
+        Args:
+            index (int): index
+
+        Returns:
+            [dict]: dataset given an index.
+        """
         item = {}
-        item['img'] = self.get_rgb_img(self.img_paths[index])
-        item['label'] = self.img_labels[index]
+        item['img'] = self.get_rgb_img(self.data_set.iloc[index]['Image Paths'])
+        item['label'] = int(self.data_set.iloc[index]['Label'])
+        item['img_path'] = self.data_set.iloc[index]['Image Paths']
         return item
